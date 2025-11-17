@@ -1,0 +1,100 @@
+stages: [ build, test, deploy ]
+
+image: docker:latest
+services:
+  - name: docker:dind
+    alias: docker
+    command: [ "--tls=false" ]
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+
+before_script:
+  - |
+    for i in $(seq 1 40); do
+      if docker info >/dev/null 2>&1; then
+        echo "Docker daemon ready"; break
+      fi
+      echo "Waiting Docker daemon..."; sleep 2
+    done
+
+###########################
+# BUILD
+###########################
+compose-check:
+  stage: build
+  services:
+    - name: docker:dind
+      alias: docker
+      command: [ "--tls=false" ]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+
+  script:
+    - echo "필수 변수 확인"
+    - |
+      if [ -z "$GEOSERVER_ADMIN" ] || [ -z "$GEOSERVER_PASSWORD" ]; then
+        echo "필수 변수 누락: GEOSERVER_ADMIN, GEOSERVER_PASSWORD"
+        exit 1
+      fi
+    - echo "기존 컨테이너 정리"
+    - docker compose down || true
+
+
+###########################
+# TEST
+###########################
+test:
+  stage: test
+  services:
+    - name: docker:dind
+      alias: docker
+      command: [ "--tls=false" ]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+
+  script:
+    - docker compose up -d
+
+    - |
+      echo "GeoServer 기동 대기..."
+      for i in $(seq 1 120); do
+        if curl -sSf http://localhost:18080/geoserver/web/ >/dev/null 2>&1; then
+          echo "GeoServer up"; break
+        fi
+        sleep 3
+      done
+
+    # REST API 테스트
+    - |
+      curl -sSf -u "$GEOSERVER_ADMIN:$GEOSERVER_PASSWORD" \
+        http://localhost:18080/geoserver/rest/about/version.json
+
+  after_script:
+    - docker compose logs geoserver | tail -n 150 || true
+    - docker compose down || true
+
+
+###########################
+# DEPLOY
+###########################
+deploy:
+  stage: deploy
+  services: [ ]   # DinD OFF
+  variables:
+    DOCKER_HOST: "unix:///var/run/host_docker.sock"
+    DOCKER_TLS_CERTDIR: ""
+
+  before_script:
+    - docker info
+
+  script:
+    - docker compose pull
+    - docker compose up -d
+    - docker compose ps
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
